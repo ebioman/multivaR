@@ -1,0 +1,17 @@
+  {
+    "name": "R Dev Environment",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": "."
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                // R Extensions
+                "streetsidesoftware.code-spell-checker",
+                "REditorSupport.r"
+            ]
+        }
+    },
+    "postCreateCommand": "R"
+}

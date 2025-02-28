@@ -1,0 +1,214 @@
+
+---
+title: Multivariable Logistic Regression
+output: rmarkdown::github_document
+params:
+  author: "eschmid"
+  date: !r Sys.Date()
+
+---
+
+```{r}
+library(tidyverse)
+library(performance)
+library(flextable)
+library(gtsummary)
+library(randomForest)
+library(equatiomatic)
+library(pROC)
+library(ggeffects)
+library(ggstats)
+library(car)
+library(vip)
+library(effectsize)
+library(dplyr)
+library(caret)
+library(gridExtra)
+```
+
+# Multivariable Logistic Regression examples 
+
+
+This is based on the example laid out in the youtube chancel [here](https://youtu.be/EIR9zN0tDPw?si=TtEUb7i43GCzznIm)
+We are looking at the titanic survival chances, based on age , class and sex.
+
+The goal is to have a model which predicts well with multiple variants the survival chances of different people depending
+on the associated factors
+
+```{r, eval=TRUE}
+
+my_data <- carData::TitanicSurvival %>% filter(!(is.na(age)))
+glimpse(my_data)
+```
+
+first a basic multivariant model with `glm`
+
+
+```{r}
+basic_model <- glm(formula = survived ~ sex + age + passengerClass,
+                    data   = my_data,
+                    family = binomial)
+```
+
+
+Now we need to check if there is linearity of the model
+
+```{r}
+non_l_model <- mgcv::gam(formula = survived ~ sex + s(age) + passengerClass,
+                    data   = my_data,
+                    family = binomial)
+plot(non_l_model)
+```
+
+This one is suppsed to check for non-linearity, but it seems not so bad for age.
+**Which is the only non-categorical value here**
+
+## Are model assumptions valid 
+
+This is a general problem which exists for many situation - is the model that we use actually applicaple for the situation.
+Or are certain conditions not met, e.g. that it is not normal, linear, exponentionally distributed...
+
+The `check_model` function, recognizes the model and test automatically the assumptions!
+
+```{r}
+check_model(basic_model)
+
+```
+
+That looks really great and we have not a high colineratiry and values are quite uniformly distributed.
+We do see some residues which are outliers, but the "influential observation" plot shows that the points are all within the region.
+
+Often variables can depend on each other, e.g. weight and size . This is in the last check included.
+
+## Predictions
+```{r}
+result1 <- ggeffect(basic_model)
+plot(result1$sex)
+plot(result1$age)
+plot(result1$passengerClass)
+```
+
+Now these are only the individual factors and their survival probabilities. But some of them might be linked and giving suddenly very
+different probabilities.
+**IMPOTRANTLY**:by default it adjusts always over the average of all from the other category.
+E.g. when looking at age, it will use the average of all sex and all class automatically.
+
+lets plot/analyze them individually
+
+
+```{r}
+effect_plot <- ggeffect(basic_model) %>% plot() %>% sjPlot::plot_grid()
+plot(effect_plot)
+```
+
+Nice way of visualization. The conclusion is quite an expected one:
+
+- female people had a higher chance of survival
+- the higher the age the lower the chance of survival 
+- 1st class (which was higher up) survived better than lower class 
+
+## Odds ratios between classes within factors 
+
+We want to know if the differences are now significant or not.
+
+```{r}
+summary_table <- tbl_regression(
+    basic_model,
+    exponentiate            = TRUE, # makes the odd ratio instead of absolute numbers 
+    add_pairwise_constrasts = TRUE,
+    contrasts_adjust        = "bonferroni",
+    pairwise_reverse        = FALSE
+)
+summary_table
+plot(summary_table)
+```
+
+## Importance of values
+
+If we want to find the most important ones within all these significant ones here
+we need to go further. For this, a type II test is being used.
+
+
+
+```{r}
+car::Anova(basic_model)
+```
+
+Here it suggests that sex is very important and significant, as well 
+for class. The age is though less important 
+
+
+## Random forest classifier
+
+Now we want to try using a more "sophisticated" model instead. 
+
+```{r}
+randomF_model <- randomForest(
+    survived ~ sex + age + passengerClass,
+    data = my_data
+)
+vip(randomF_model)
+```
+
+Surprise, we get similarly a ranking of importance of the different factors and very similar results
+
+# Model to data fit 
+
+
+```{r}
+perf_basic <- performance(basic_model)
+perf_basic
+#performance(randomF_model)
+```
+The R2 value is only `r  perf_basic$R2_Tjur ` what does it mean ?
+It means our 3 predictors explain almost 38% of the variance and this is substantial (>26% is substantial)
+
+Unfortunately, we cant use the same function for the random forest model.
+But what we can do instead is making the predictions from both models for survival
+and then evaluate the confusion matrix.
+
+Note: with the glm model we get probabilities, whereas the random forest model already predicts a yes/no case.
+
+```{r}
+predict_basic    <- predict.glm(basic_model,my_data)
+my_data$glm_pred <- as.factor(case_when( predict_basic > 0.5 ~ "yes", .default="no"))
+my_data$rf_pred  <- predict(randomF_model,my_data)
+```
+
+
+## ROC curve
+
+So now we want to asses how good the model is to predict the values and measure the area under the curve (AUC).
+Above 0.8 is a great model < 0.5 is worse than random.
+
+```{r}
+roc_result <- roc(survived ~ fitted.values(basic_model),
+    data = my_data,
+    plot=TRUE,
+    legacy.axes = TRUE,
+    print.auc = TRUE,
+    ci = TRUE)
+```
+
+We have an AUC of `r roc_result$auc` which is actually great. 
+Again ROC with the random forest model wont work
+
+## Confusion matrix
+
+```{r}
+glm_cmatrix <- confusionMatrix(reference=my_data$survived,data=my_data$glm_pred)
+rf_cmatrix  <- confusionMatrix(reference=my_data$survived,data=my_data$rf_pred)
+
+glm_cmatrix
+rf_cmatrix
+
+fourfoldplot(as.table(glm_cmatrix), color=c("orange","steelblue"), main="Confusion matrix: glm")
+fourfoldplot(as.table(rf_cmatrix), color=c("orange","steelblue"),main="Confusion matrix: random forest")
+```
+
+We can see that the random forest classification is slightly better than the Multivariable Logistic Regression.
+This is reflected e.g. in the accuracy of `r  rf_cmatrix$overall["Accuracy"][[1]] ` for random forest and `r  glm_cmatrix$overall["Accuracy"][[1]]` for the glm.
+Whereas sensitivity is very similar with a delta of only `r abs(rf_cmatrix$byClass["Sensitivity"]-glm_cmatrix$byClass["Sensitivity"])` , the difference in specificity is much higher 
+with `r abs(rf_cmatrix$byClass["Specificity"]-glm_cmatrix$byClass["Specificity"])`. 
+
+
